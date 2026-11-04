@@ -8,14 +8,14 @@
 </head>
 <body>
   <h1>Blazer's Edge – Deni/Avdija Scanner</h1>
-  <p class="subtitle">Scan articles and comments on Blazer's Edge for mentions of "Deni" or "Avdija".</p>
+  <p class="subtitle" id="subtitle">Scan recent Blazer's Edge articles and comments for mentions of Deni Avdija.</p>
 
   <div class="actions">
     <button type="button" class="btn btn-primary" id="run-scan">Run new scan</button>
-    <button type="button" class="btn btn-print" id="print-results" style="display: none;">Print results</button>
-    <button type="button" class="btn" id="export-csv" style="display: none;">Export CSV</button>
+    <button type="button" class="btn btn-print" id="print-results" hidden>Print results</button>
+    <button type="button" class="btn" id="export-csv" hidden>Export CSV</button>
     <button type="button" class="btn btn-danger" id="delete-all-scans">Delete all scans</button>
-    <span class="status-msg" id="status-msg"></span>
+    <span class="status-msg" id="status-msg" role="status"></span>
   </div>
 
   <section class="scans-section">
@@ -23,34 +23,25 @@
     <ul class="scan-list" id="scan-list"></ul>
   </section>
 
-  <div class="results-panel" id="results-panel" style="display: none;">
-    <h3>Matching articles <span class="sort-hint">(newest first)</span></h3>
+  <div class="results-panel" id="results-panel" hidden>
+    <h3>Matching articles <span class="sort-hint" id="articles-count"></span></h3>
     <div class="table-wrap">
-      <table id="articles-table">
+      <table>
         <thead>
-          <tr>
-            <th>Date</th>
-            <th>Title</th>
-            <th>URL</th>
-            <th>Snippet</th>
-            <th>Keywords</th>
-          </tr>
+          <tr><th>Date</th><th>Title</th><th>Snippet</th><th>Keywords</th></tr>
         </thead>
         <tbody id="articles-body"></tbody>
       </table>
     </div>
-    <h3>Matching comments <span class="sort-hint">(newest first by article)</span></h3>
+
+    <div class="comments-header">
+      <h3>Matching comments <span class="sort-hint" id="comments-count"></span></h3>
+      <input type="search" id="comment-filter" class="filter-input" placeholder="Filter by author, article or text…">
+    </div>
     <div class="table-wrap">
-      <table id="comments-table">
+      <table>
         <thead>
-          <tr>
-            <th>Article date</th>
-            <th>Article</th>
-            <th>Comment #</th>
-            <th>Author</th>
-            <th>Comment</th>
-            <th>Keywords</th>
-          </tr>
+          <tr><th>Article</th><th>Comment #</th><th>Posted</th><th>Author</th><th>Comment</th></tr>
         </thead>
         <tbody id="comments-body"></tbody>
       </table>
@@ -58,243 +49,258 @@
   </div>
 
   <script>
-    const statusEl = document.getElementById('status-msg');
-    const scanListEl = document.getElementById('scan-list');
-    const resultsPanel = document.getElementById('results-panel');
-    const articlesBody = document.getElementById('articles-body');
-    const commentsBody = document.getElementById('comments-body');
-    const printBtn = document.getElementById('print-results');
-    const exportBtn = document.getElementById('export-csv');
+    const $ = id => document.getElementById(id);
+    const statusEl = $('status-msg');
+    const runBtn = $('run-scan');
+    const state = { selectedScanId: null, results: null, pollTimer: null };
 
-    let selectedScanId = null;
-    let pollInterval = null;
-
-    function setStatus(msg) {
-      statusEl.textContent = msg;
-    }
+    function setStatus(msg) { statusEl.textContent = msg || ''; }
 
     function escapeHtml(s) {
-      if (!s) return '';
-      const div = document.createElement('div');
-      div.textContent = s;
-      return div.innerHTML;
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
-    function renderKeywords(keywordsStr) {
-      if (!keywordsStr) return '';
-      const list = keywordsStr.split(',').map(k => k.trim()).filter(Boolean);
-      return list.map(k => `<span>${escapeHtml(k)}</span>`).join('');
+    // Older rows were stored without a timezone suffix; they are UTC.
+    function parseUtc(s) {
+      if (!s) return null;
+      const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : s + 'Z');
+      return isNaN(d) ? null : d;
+    }
+    function fmtDate(s) {
+      const d = parseUtc(s);
+      return d ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+    }
+    function fmtDateTime(s) {
+      const d = parseUtc(s);
+      return d ? d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—';
     }
 
-    function highlightKeywords(text, keywordsStr) {
-      if (!text) return '';
-      if (!keywordsStr) return escapeHtml(text);
-      const keywords = keywordsStr.split(',').map(k => k.trim()).filter(Boolean);
-      if (keywords.length === 0) return escapeHtml(text);
-      // Build a regex that matches any keyword (case-insensitive, whole occurrences)
-      const pattern = keywords
-        .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-        .join('|');
-      const re = new RegExp('(' + pattern + ')', 'gi');
-      // Split on matches, escape each part, wrap matches in <mark>
-      return text.split(re).map((part, i) =>
-        i % 2 === 1
-          ? `<mark class="kw-highlight">${escapeHtml(part)}</mark>`
-          : escapeHtml(part)
-      ).join('');
+    function splitKeywords(str) { return (str || '').split(',').map(k => k.trim()).filter(Boolean); }
+
+    // Mirrors scanner/keywords.py: word boundaries, case-insensitive, optional possessive.
+    function highlight(text, keywordsStr) {
+      const kws = splitKeywords(keywordsStr).sort((a, b) => b.length - a.length);
+      if (!text || !kws.length) return escapeHtml(text);
+      const alt = kws.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+')).join('|');
+      const re = new RegExp(`\\b((?:${alt})(?:['\u2019]?s)?)\\b`, 'gi');
+      return text.split(re).map((part, i) => i % 2 ? `<mark>${escapeHtml(part)}</mark>` : escapeHtml(part)).join('');
     }
 
-    function formatArticleDate(isoOrDateStr) {
-      if (!isoOrDateStr) return '—';
+    function authHeaders() {
+      const pw = localStorage.getItem('scannerPassword');
+      return pw ? { 'X-Scanner-Password': pw } : {};
+    }
+
+    // fetch wrapper for state-changing calls: prompts for the password on 401 and retries once.
+    async function api(url, options = {}, retried = false) {
+      const res = await fetch(url, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
+      if (res.status === 401 && !retried) {
+        const pw = prompt('Password required:');
+        if (pw === null) throw new Error('Cancelled');
+        localStorage.setItem('scannerPassword', pw);
+        return api(url, options, true);
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status, data });
+      return data;
+    }
+
+    async function loadConfig() {
       try {
-        const d = new Date(isoOrDateStr);
-        if (isNaN(d.getTime())) return isoOrDateStr;
-        return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+        const cfg = await api('/api/config');
+        $('subtitle').textContent =
+          `Scans articles from the last ${cfg.lookback_days} days (up to ${cfg.max_articles}) and their comments ` +
+          `for: ${cfg.keywords.join(', ')}.`;
+      } catch (e) { /* keep default subtitle */ }
+    }
+
+    async function loadScans() {
+      let data;
+      try { data = await api('/api/scans'); } catch (e) { setStatus('Failed to load scans.'); return; }
+      const list = $('scan-list');
+      list.innerHTML = '';
+      if (!data.scans.length) {
+        list.innerHTML = '<li class="scan-item empty-item">No scans yet. Click "Run new scan" to start.</li>';
+        return data.scans;
+      }
+      for (const scan of data.scans) {
+        const li = document.createElement('li');
+        li.className = 'scan-item' + (state.selectedScanId === scan.id ? ' selected' : '');
+        li.dataset.scanId = scan.id;
+        const detail = scan.status === 'running'
+          ? escapeHtml(scan.progress || 'Running…')
+          : scan.status === 'failed'
+            ? `<span class="error-text">${escapeHtml(scan.error_message || 'Failed')}</span>`
+            : `Articles: ${scan.articles_found ?? 0} · Comments: ${scan.comments_found ?? 0}`;
+        li.innerHTML = `
+          <div>
+            <strong>Scan #${scan.id}</strong> — ${escapeHtml(fmtDateTime(scan.started_at))}
+            <div class="meta">${detail}</div>
+          </div>
+          <div class="scan-item-actions">
+            <span class="badge ${escapeHtml(scan.status)}">${escapeHtml(scan.status)}</span>
+            ${scan.status !== 'running' ? '<button type="button" class="icon-btn" title="Delete scan" aria-label="Delete scan">✕</button>' : ''}
+          </div>`;
+        li.addEventListener('click', () => selectScan(scan.id));
+        li.querySelector('.icon-btn')?.addEventListener('click', ev => { ev.stopPropagation(); deleteScan(scan.id); });
+        list.appendChild(li);
+      }
+      return data.scans;
+    }
+
+    async function selectScan(scanId) {
+      state.selectedScanId = scanId;
+      document.querySelectorAll('.scan-item').forEach(el =>
+        el.classList.toggle('selected', Number(el.dataset.scanId) === scanId));
+      setStatus('Loading results…');
+      try {
+        const data = await api(`/api/scans/${scanId}/results`);
+        state.results = data.results;
+        renderResults();
+        $('results-panel').hidden = false;
+        $('print-results').hidden = $('export-csv').hidden = false;
+        setStatus('');
       } catch (e) {
-        return isoOrDateStr;
+        setStatus('Failed to load results.');
       }
     }
 
-    function loadScans() {
-      fetch('/api/scans')
-        .then(r => r.json())
-        .then(data => {
-          scanListEl.innerHTML = '';
-          if (!data.scans || data.scans.length === 0) {
-            scanListEl.innerHTML = '<li class="scan-item" style="cursor:default;">No scans yet. Click "Run new scan" to start.</li>';
+    function renderResults() {
+      const { articles, comments } = state.results;
+      $('articles-count').textContent = `(${articles.length}, newest first)`;
+      $('articles-body').innerHTML = articles.length ? articles.map(a => `
+        <tr>
+          <td class="date-cell">${escapeHtml(fmtDate(a.article_date))}</td>
+          <td><a href="${escapeHtml(a.url)}" target="_blank" rel="noopener"><strong>${escapeHtml(a.title)}</strong></a></td>
+          <td class="snippet">${highlight(a.snippet_or_body, a.matched_keywords)}</td>
+          <td><div class="keywords">${splitKeywords(a.matched_keywords).map(k => `<span>${escapeHtml(k)}</span>`).join('')}</div></td>
+        </tr>`).join('') : '<tr><td colspan="4" class="empty">No matching articles.</td></tr>';
+      renderComments();
+    }
+
+    function renderComments() {
+      const q = $('comment-filter').value.trim().toLowerCase();
+      const all = state.results.comments;
+      const rows = q ? all.filter(c => `${c.author} ${c.article_title} ${c.comment_text}`.toLowerCase().includes(q)) : all;
+      $('comments-count').textContent = q ? `(${rows.length} of ${all.length})` : `(${all.length}, grouped by article, newest first)`;
+      let lastArticle = null;
+      $('comments-body').innerHTML = rows.length ? rows.map(c => {
+        const first = c.article_url !== lastArticle;
+        lastArticle = c.article_url;
+        const num = c.comment_index != null ? `${c.comment_index}${c.total_comments ? ' of ' + c.total_comments : ''}` : '—';
+        return `
+        <tr class="${first ? 'group-start' : ''}">
+          <td>${first ? `<a href="${escapeHtml(c.article_url)}" target="_blank" rel="noopener">${escapeHtml(c.article_title || 'Article')}</a>
+                <div class="date-cell">${escapeHtml(fmtDate(c.article_date))}</div>` : ''}</td>
+          <td class="nowrap">${escapeHtml(num)}${c.is_reply ? ' <span class="reply-tag">reply</span>' : ''}</td>
+          <td class="date-cell">${escapeHtml(fmtDateTime(c.comment_created_at))}</td>
+          <td>${escapeHtml(c.author)}</td>
+          <td class="snippet comment-text">${highlight(c.comment_text, c.matched_keywords)}</td>
+        </tr>`;
+      }).join('') : `<tr><td colspan="5" class="empty">${q ? 'No comments match the filter.' : 'No matching comments.'}</td></tr>`;
+    }
+
+    function pollScan(scanId) {
+      clearTimeout(state.pollTimer);
+      runBtn.disabled = true;
+      const tick = async () => {
+        try {
+          const { scan } = await api(`/api/scans/${scanId}`);
+          if (scan.status === 'running') {
+            setStatus(`Scan #${scanId}: ${scan.progress || 'running…'}`);
+            const li = document.querySelector(`.scan-item[data-scan-id="${scanId}"] .meta`);
+            if (li) li.textContent = scan.progress || 'Running…';
+            state.pollTimer = setTimeout(tick, 2000);
             return;
           }
-          data.scans.forEach(scan => {
-            const li = document.createElement('li');
-            li.className = 'scan-item' + (selectedScanId === scan.id ? ' selected' : '');
-            li.dataset.scanId = scan.id;
-            const date = scan.started_at ? new Date(scan.started_at).toLocaleString() : '—';
-            const badge = scan.status === 'running' ? 'running' : (scan.status === 'failed' ? 'failed' : 'done');
-            li.innerHTML = `
-              <div>
-                <strong>Scan #${scan.id}</strong> — ${date}
-                <div class="meta">Articles: ${scan.articles_found ?? '—'}, Comments: ${scan.comments_found ?? '—'}</div>
-              </div>
-              <span class="badge ${badge}">${scan.status}</span>
-            `;
-            li.addEventListener('click', () => selectScan(scan.id));
-            scanListEl.appendChild(li);
-          });
-        })
-        .catch(() => setStatus('Failed to load scans.'));
+          runBtn.disabled = false;
+          setStatus(scan.status === 'failed' ? `Scan #${scanId} failed: ${scan.error_message}` : `Scan #${scanId} finished.`);
+          await loadScans();
+          selectScan(scanId);
+        } catch (e) {
+          state.pollTimer = setTimeout(tick, 5000);
+        }
+      };
+      tick();
     }
 
-    function selectScan(scanId) {
-      selectedScanId = scanId;
-      document.querySelectorAll('.scan-item').forEach(el => {
-        el.classList.toggle('selected', parseInt(el.dataset.scanId, 10) === scanId);
-      });
-      loadResults(scanId);
-      resultsPanel.style.display = 'block';
-      printBtn.style.display = 'inline-flex';
-      exportBtn.style.display = 'inline-flex';
-    }
-
-    function loadResults(scanId) {
-      setStatus('Loading results…');
-      fetch(`/api/scans/${scanId}/results`)
-        .then(r => r.json())
-        .then(data => {
-          setStatus('');
-          const { results } = data;
-          articlesBody.innerHTML = '';
-          if (results.articles && results.articles.length > 0) {
-            results.articles.forEach(a => {
-              const tr = document.createElement('tr');
-              const dateStr = a.article_date ? formatArticleDate(a.article_date) : '—';
-              tr.innerHTML = `
-                <td class="date-cell">${escapeHtml(dateStr)}</td>
-                <td><strong>${escapeHtml(a.title)}</strong></td>
-                <td><a href="${escapeHtml(a.url)}" target="_blank" rel="noopener">Open</a></td>
-                <td class="snippet">${escapeHtml(a.snippet_or_body || '')}</td>
-                <td><div class="keywords">${renderKeywords(a.matched_keywords)}</div></td>
-              `;
-              articlesBody.appendChild(tr);
-            });
-          } else {
-            articlesBody.innerHTML = '<tr><td colspan="5" class="empty">No matching articles.</td></tr>';
-          }
-          commentsBody.innerHTML = '';
-          if (results.comments && results.comments.length > 0) {
-            results.comments.forEach(c => {
-              const tr = document.createElement('tr');
-              const dateStr = c.article_date ? formatArticleDate(c.article_date) : '—';
-              const commentNum = c.comment_index != null
-                ? (c.total_comments != null ? (c.comment_index + ' of ' + c.total_comments) : ('#' + c.comment_index))
-                : '—';
-              tr.innerHTML = `
-                <td class="date-cell">${escapeHtml(dateStr)}</td>
-                <td><a href="${escapeHtml(c.article_url)}" target="_blank" rel="noopener">${escapeHtml(c.article_title || 'Article')}</a></td>
-                <td>${escapeHtml(commentNum)}</td>
-                <td>${escapeHtml(c.author)}</td>
-                <td class="snippet">${highlightKeywords(c.comment_text, c.matched_keywords)}</td>
-                <td><div class="keywords">${renderKeywords(c.matched_keywords)}</div></td>
-              `;
-              commentsBody.appendChild(tr);
-            });
-          } else {
-            commentsBody.innerHTML = '<tr><td colspan="6" class="empty">No matching comments.</td></tr>';
-          }
-        })
-        .catch(() => setStatus('Failed to load results.'));
-    }
-
-    function startScan() {
-      const btn = document.getElementById('run-scan');
-      btn.disabled = true;
+    async function startScan() {
+      runBtn.disabled = true;
       setStatus('Starting scan…');
-      fetch('/api/scan', { method: 'POST' })
-        .then(r => r.json())
-        .then(data => {
-          const scanId = data.scan_id;
-          setStatus('Scan #' + scanId + ' running. This may take a few minutes.');
-          loadScans();
-          pollInterval = setInterval(() => {
-            fetch(`/api/scans/${scanId}/status`)
-              .then(r => r.json())
-              .then(s => {
-                if (s.status !== 'running') {
-                  clearInterval(pollInterval);
-                  pollInterval = null;
-                  btn.disabled = false;
-                  setStatus('Scan finished.');
-                  loadScans();
-                  selectScan(scanId);
-                }
-              });
-          }, 3000);
-        })
-        .catch(() => {
-          btn.disabled = false;
-          setStatus('Failed to start scan.');
-        });
+      try {
+        const { scan_id } = await api('/api/scan', { method: 'POST' });
+        await loadScans();
+        pollScan(scan_id);
+      } catch (e) {
+        if (e.status === 409 && e.data?.scan_id) { pollScan(e.data.scan_id); return; }
+        runBtn.disabled = false;
+        setStatus(e.message === 'Cancelled' ? '' : `Failed to start scan: ${e.message}`);
+      }
     }
 
-    function printResults() {
-      window.print();
+    function clearSelection() {
+      state.selectedScanId = null;
+      state.results = null;
+      $('results-panel').hidden = true;
+      $('print-results').hidden = $('export-csv').hidden = true;
+    }
+
+    async function deleteScan(scanId) {
+      if (!confirm(`Delete scan #${scanId}?`)) return;
+      try {
+        await api(`/api/scans/${scanId}`, { method: 'DELETE' });
+        if (state.selectedScanId === scanId) clearSelection();
+        loadScans();
+      } catch (e) { if (e.message !== 'Cancelled') setStatus(`Delete failed: ${e.message}`); }
+    }
+
+    async function deleteAllScans() {
+      if (!confirm('Delete all finished scans and their results? This cannot be undone.')) return;
+      try {
+        await api('/api/scans', { method: 'DELETE' });
+        clearSelection();
+        setStatus('All finished scans deleted.');
+        loadScans();
+      } catch (e) { if (e.message !== 'Cancelled') setStatus(`Delete failed: ${e.message}`); }
+    }
+
+    function csvCell(v) {
+      let s = String(v ?? '');
+      if (/^[=+\-@]/.test(s)) s = "'" + s;  // stop spreadsheet formula injection
+      return `"${s.replace(/"/g, '""')}"`;
     }
 
     function exportCsv() {
-      if (!selectedScanId) return;
-      fetch(`/api/scans/${selectedScanId}/results`)
-        .then(r => r.json())
-        .then(data => {
-          const rows = [];
-          rows.push('Type,Date,Title/Article,URL/Author,Comment #,Content,Keywords');
-          (data.results.articles || []).forEach(a => {
-            rows.push(`Article,${csvCell(a.article_date || '')},${csvCell(a.title)},${csvCell(a.url)},,${csvCell(a.snippet_or_body)},${csvCell(a.matched_keywords)}`);
-          });
-          (data.results.comments || []).forEach(c => {
-            const commentNum = c.comment_index != null
-              ? (c.total_comments != null ? (c.comment_index + ' of ' + c.total_comments) : ('#' + c.comment_index))
-              : '';
-            rows.push(`Comment,${csvCell(c.article_date || '')},${csvCell(c.article_title)},${csvCell(c.author)},${csvCell(commentNum)},${csvCell(c.comment_text)},${csvCell(c.matched_keywords)}`);
-          });
-          const blob = new Blob([rows.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = `blazers-scan-${selectedScanId}.csv`;
-          a.click();
-          URL.revokeObjectURL(a.href);
-        });
+      if (!state.results) return;
+      const rows = [['Type', 'Article date', 'Article', 'URL', 'Comment #', 'Comment posted', 'Author', 'Text', 'Keywords']];
+      for (const a of state.results.articles) {
+        rows.push(['Article', a.article_date, a.title, a.url, '', '', '', a.snippet_or_body, a.matched_keywords]);
+      }
+      for (const c of state.results.comments) {
+        const num = c.comment_index != null ? `${c.comment_index}${c.total_comments ? ' of ' + c.total_comments : ''}` : '';
+        rows.push(['Comment', c.article_date, c.article_title, c.article_url, num, c.comment_created_at, c.author, c.comment_text, c.matched_keywords]);
+      }
+      // BOM so Excel opens the file as UTF-8.
+      const blob = new Blob(['\ufeff' + rows.map(r => r.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `blazers-scan-${state.selectedScanId}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     }
 
-    function csvCell(s) {
-      if (s == null) return '';
-      const t = String(s).replace(/"/g, '""');
-      return `"${t}"`;
-    }
+    runBtn.addEventListener('click', startScan);
+    $('delete-all-scans').addEventListener('click', deleteAllScans);
+    $('print-results').addEventListener('click', () => window.print());
+    $('export-csv').addEventListener('click', exportCsv);
+    $('comment-filter').addEventListener('input', () => state.results && renderComments());
 
-    function deleteAllScans() {
-      if (!confirm('Delete all scans and their results? This cannot be undone.')) return;
-      setStatus('Deleting…');
-      fetch('/api/scans', { method: 'DELETE' })
-        .then(r => {
-          if (!r.ok) throw new Error('Delete failed');
-          return r.json();
-        })
-        .then(() => {
-          setStatus('All scans deleted.');
-          selectedScanId = null;
-          resultsPanel.style.display = 'none';
-          printBtn.style.display = 'none';
-          exportBtn.style.display = 'none';
-          loadScans();
-        })
-        .catch(() => setStatus('Failed to delete scans.'));
-    }
-
-    document.getElementById('run-scan').addEventListener('click', startScan);
-    document.getElementById('delete-all-scans').addEventListener('click', deleteAllScans);
-    printBtn.addEventListener('click', printResults);
-    exportBtn.addEventListener('click', exportCsv);
-
-    loadScans();
+    loadConfig();
+    loadScans().then(scans => {
+      const running = scans?.find(s => s.status === 'running');
+      if (running) pollScan(running.id);
+      else if (scans?.length) selectScan(scans[0].id);
+    });
   </script>
 </body>
 </html>

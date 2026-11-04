@@ -1,86 +1,84 @@
-"""Discover article URLs from Blazer's Edge homepage and listings."""
+﻿"""Discover article URLs from Blazer's Edge listing pages and the RSS feed."""
 
+import logging
 import re
-import time
 from urllib.parse import urljoin, urlparse
 
-import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://www.blazersedge.com/"
-FEED_URL = "https://www.blazersedge.com/feed"
-NBA_NEWS_URL = "https://www.blazersedge.com/nba-news-rumors"
-GAME_THREADS_URL = "https://www.blazersedge.com/blazers-game-threads"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-REQUEST_DELAY_SEC = 1.0
+from . import config
+from .http import get_session
 
-# Article URLs contain a numeric ID segment, e.g. /trail-blazers-news/109834/...
-ARTICLE_PATH_PATTERN = re.compile(r"/[a-z0-9-]+/\d+/[a-z0-9-]+")
+logger = logging.getLogger(__name__)
+
+LISTING_URLS = [
+    f"{config.SITE_URL}/",
+    f"{config.SITE_URL}/rss/index.xml",
+    f"{config.SITE_URL}/trail-blazers-news",
+    f"{config.SITE_URL}/trail-blazers-analysis",
+    f"{config.SITE_URL}/nba-news-rumors",
+    f"{config.SITE_URL}/gameday-coverage",
+    f"{config.SITE_URL}/trail-blazers-discussion-game-threads",
+]
+
+# Article paths look like /trail-blazers-news/117719/ja-morant-injury-news
+ARTICLE_PATH = re.compile(r"^/[a-z0-9-]+/(\d{5,7})/[a-z0-9-]+/?$")
+FEED_URL_PATTERN = re.compile(r"https?://(?:www\.)?blazersedge\.com(/[^\s<>\"'#?]+)")
 
 
-def _is_article_url(url: str) -> bool:
+def article_id(url: str) -> int | None:
+    m = ARTICLE_PATH.match(urlparse(url).path)
+    return int(m.group(1)) if m else None
+
+
+def _normalize(url: str) -> str | None:
     parsed = urlparse(url)
-    if parsed.netloc and "blazersedge.com" not in parsed.netloc:
-        return False
-    return bool(ARTICLE_PATH_PATTERN.search(parsed.path or ""))
+    if parsed.netloc and not parsed.netloc.endswith("blazersedge.com"):
+        return None
+    if not ARTICLE_PATH.match(parsed.path):
+        return None
+    return config.SITE_URL + parsed.path.rstrip("/")
 
 
-def _get_urls_from_feed(feed_text: str) -> set[str]:
-    """
-    Extract blazersedge.com article URLs from an RSS/Atom feed.
-    RSS/Atom feeds are XML – they use <link>, <guid>, and <id> elements, NOT <a href>.
-    This function scans the raw feed text for any matching article URL.
-    """
+def _urls_from_html(html: str, base: str) -> set[str]:
+    soup = BeautifulSoup(html, "lxml")
     urls = set()
-    # Match any blazersedge.com URL that looks like an article (has a numeric ID segment)
-    pattern = re.compile(r'https?://(?:www\.)?blazersedge\.com(/[^\s<>"\'&#]+)')
-    for match in pattern.finditer(feed_text):
-        path = match.group(1).split("#")[0].rstrip("/")
-        url = "https://www.blazersedge.com" + path
-        if _is_article_url(url):
+    for a in soup.find_all("a", href=True):
+        url = _normalize(urljoin(base, a["href"].strip()))
+        if url:
             urls.add(url)
     return urls
 
 
-def get_article_urls_from_page(html: str, base: str = BASE_URL) -> set[str]:
-    """Parse HTML and return set of Blazer's Edge article URLs (with numeric ID)."""
-    soup = BeautifulSoup(html, "lxml")
+def _urls_from_feed(text: str) -> set[str]:
     urls = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        full = urljoin(base, href)
-        parsed = urlparse(full)
-        if "blazersedge.com" in (parsed.netloc or "") and _is_article_url(full):
-            # Normalize: no fragment
-            normalized = full.split("#")[0]
-            urls.add(normalized)
+    for m in FEED_URL_PATTERN.finditer(text):
+        url = _normalize(config.SITE_URL + m.group(1))
+        if url:
+            urls.add(url)
     return urls
 
 
-def crawl_article_urls(max_articles: int = 50) -> list[str]:
-    """
-    Fetch Blazer's Edge homepage and extract article links.
-    Returns deduplicated list of article URLs, up to max_articles.
-    """
-    session = requests.Session()
-    session.headers["User-Agent"] = USER_AGENT
-
-    all_urls = set()
-    pages_to_fetch = [BASE_URL, FEED_URL, NBA_NEWS_URL, GAME_THREADS_URL]
-
-    for page_url in pages_to_fetch:
+def crawl_article_urls(max_articles: int = config.MAX_ARTICLES) -> list[str]:
+    """Return up to max_articles article URLs, newest first (article ids increase over time)."""
+    session = get_session()
+    found: set[str] = set()
+    for page_url in LISTING_URLS:
         try:
-            resp = session.get(page_url, timeout=15)
+            resp = session.get(page_url, timeout=config.REQUEST_TIMEOUT_SEC)
             resp.raise_for_status()
-            # RSS/Atom feeds are XML — use a dedicated feed parser instead of HTML link extraction
-            if page_url == FEED_URL:
-                urls = _get_urls_from_feed(resp.text)
-            else:
-                urls = get_article_urls_from_page(resp.text, page_url)
-            all_urls.update(urls)
-        except Exception:
-            pass
-        time.sleep(REQUEST_DELAY_SEC)
+        except Exception as e:
+            logger.warning("Listing %s failed: %s", page_url, e)
+            continue
+        urls = _urls_from_feed(resp.text) if page_url.endswith(".xml") else _urls_from_html(resp.text, page_url)
+        logger.info("Listing %s: %d article links", page_url, len(urls))
+        found |= urls
 
-    result = list(all_urls)[:max_articles]
-    return result
+    # The same article can appear under several slugs/sections; keep one URL per id.
+    by_id: dict[int, str] = {}
+    for url in found:
+        aid = article_id(url)
+        if aid is not None:
+            by_id.setdefault(aid, url)
+    newest_first = [by_id[aid] for aid in sorted(by_id, reverse=True)]
+    return newest_first[:max_articles]

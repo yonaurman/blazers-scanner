@@ -17,6 +17,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   background: var(--bg);
@@ -144,6 +148,35 @@ h1 {
   color: var(--muted);
 }
 
+.scan-item.empty-item {
+  cursor: default;
+}
+
+.scan-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+}
+
+.icon-btn:hover {
+  color: var(--error);
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.error-text {
+  color: var(--error);
+}
+
 .scan-item .badge {
   font-size: 0.75rem;
   padding: 0.2rem 0.5rem;
@@ -253,11 +286,65 @@ td a:hover {
   color: var(--accent);
 }
 
-mark.kw-highlight {
+mark {
   background: #ffe066;
-  color: inherit;
+  color: #111;
   border-radius: 2px;
   padding: 0 1px;
+}
+
+.comments-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.comments-header h3 {
+  margin: 0;
+}
+
+.filter-input {
+  min-width: 16rem;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.filter-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+tr.group-start td {
+  border-top: 2px solid var(--border);
+}
+
+td {
+  vertical-align: top;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.comment-text {
+  white-space: pre-line;
+  color: var(--text);
+}
+
+.reply-tag {
+  font-size: 0.7rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 4px;
+  background: var(--border);
+  color: var(--muted);
 }
 
 .status-msg {
@@ -268,7 +355,8 @@ mark.kw-highlight {
 
 @media print {
   body { background: #fff; color: #111; }
-  .actions .btn:not(.btn-print) { display: none; }
+  .actions, .scans-section, .filter-input, .icon-btn { display: none; }
+  .comment-text { color: #111; }
   .scan-list { border: 1px solid #ddd; }
   .scan-item { background: #f5f5f5; border-color: #ddd; }
   .results-panel { background: #fff; border: 1px solid #ddd; }

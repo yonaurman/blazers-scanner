@@ -36,6 +36,13 @@ if errorlevel 1 (
 :: Move to the script's directory so relative paths work
 cd /d "%~dp0"
 
+:: The tunnel URL is public; a password stops strangers from starting or deleting scans.
+:: Set it once with:  setx SCANNER_PASSWORD "your-password"   (then open a new terminal)
+if "%SCANNER_PASSWORD%"=="" (
+    echo [WARN] SCANNER_PASSWORD is not set - anyone with the tunnel URL can start/delete scans.
+    echo.
+)
+
 :: Start Flask app in a separate window
 echo [1/2] Starting Flask app on http://localhost:5000 ...
 start "Blazers Scanner - Flask App" cmd /k "python app.py"

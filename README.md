@@ -1,67 +1,78 @@
 # Blazer's Edge Deni/Avdija Scanner
 
-A dashboard that scans [Blazer's Edge](https://www.blazersedge.com/) for **articles from the last 3 days** and their comments, matching the keywords **"deni"**, **"Deni"**, **"Avidja"**, **"Avdija"**, or **"Deni Avdija"**, then displays the results in a web UI.
+A dashboard that scans [Blazer's Edge](https://www.blazersedge.com/) for **articles from the last 3 days** and their
+comments that mention **Deni Avdija** (keywords `Deni`, `Avdija`, and the common misspelling `Avidja`), and shows the
+results in a web UI.
 
-## Requirements
+## How it works
 
-- Python 3.10+
-- Chromium (for Playwright comment scraping)
+1. Collects article links from the homepage, section pages and the RSS feed (newest first, up to 80).
+2. Fetches each article (4 in parallel) and reads its title, publish date and body from the page's JSON-LD metadata.
+   Articles older than the lookback window are skipped.
+3. For each recent article, downloads **all** comments from SB Nation's comment service ("Cyclone",
+   `https://beta.sbnation.com/api`, GraphQL) in one request — no browser needed.
+4. Matches keywords case-insensitively on word boundaries, so `Deni`, `deni`, `Deni's` and `Denis` match but
+   `denied` does not.
+
+A full scan takes well under a minute.
 
 ## Setup
 
-1. **Create a virtual environment (recommended)**
-
-   ```bash
-   cd blazers-scanner
-   python -m venv venv
-   venv\Scripts\activate   # Windows
-   # or: source venv/bin/activate   # macOS/Linux
-   ```
-
-2. **Install dependencies**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Install Playwright browsers (required for comment scraping)**
-
-   ```bash
-   playwright install chromium
-   ```
-
-## Run the app
+Requires Python 3.10+.
 
 ```bash
- python app.py
+cd blazers-scanner
+python -m venv venv
+venv\Scripts\activate          # Windows  (macOS/Linux: source venv/bin/activate)
+pip install -r requirements.txt
 ```
 
-Then open **http://127.0.0.1:5000** in your browser.
+## Run
 
-## Usage
+```bash
+python app.py
+```
 
-1. Click **Run new scan** to start a scan. The scanner will:
-   - Crawl the Blazer's Edge homepage for article links
-   - Keep only articles from the **last 3 days** (by article publish date)
-   - For each recent article, look for "deni", "Deni", "Avidja", "Avdija", or "Deni Avdija" in the title and body
-   - Open each recent article in a headless browser and collect comments that mention those keywords
-2. Recent scans appear in the list. Click a scan to view **Matching articles** and **Matching comments**.
-3. Use **Print results** to print the current results, or **Export CSV** to download them as a CSV file.
+Open **http://127.0.0.1:5000**. To share it publicly, run `start.bat`, which also starts a Cloudflare quick tunnel.
+`stop.bat` shuts both down.
+
+Because the tunnel URL is public, set a password so only you can start or delete scans (viewing stays open):
+
+```bat
+setx SCANNER_PASSWORD "choose-a-password"
+```
+
+The browser asks for it the first time you click a protected button and remembers it.
+
+## Command line
+
+```bash
+python -m scanner                       # run a full scan, save it to the DB, print a summary
+python -m scanner <article-url>         # check one article and print its matching comments
+```
 
 ## Configuration
 
-Edit `app.py` to change:
+All settings are environment variables (defaults in `scanner/config.py`):
 
-- `app.config["MAX_ARTICLES"]` — maximum number of articles to crawl (default: 50)
-- `app.config["KEYWORDS"]` — list of keywords to search for (default: `["deni", "Deni", "Avidja", "Avdija", "Deni Avdija"]`)
-- In `scanner/articles.py`, `LAST_WEEK_DAYS` (default: 3) controls how many days back an article is considered "recent"; only recent articles are scanned for keyword matches and comments.
+| Variable           | Default                | Meaning                                    |
+|--------------------|------------------------|--------------------------------------------|
+| `KEYWORDS`         | `Deni,Avdija,Avidja`   | Comma-separated keywords                   |
+| `LOOKBACK_DAYS`    | `3`                    | Only articles newer than this are scanned  |
+| `MAX_ARTICLES`     | `80`                   | Max article links to check                 |
+| `FETCH_WORKERS`    | `4`                    | Parallel article fetches                   |
+| `SCANNER_PASSWORD` | *(unset)*              | Required to start/delete scans when set    |
+| `HOST` / `PORT`    | `127.0.0.1` / `5000`   | Bind address                               |
 
 ## Data
 
-Scan results are stored in SQLite at `blazers-scanner/data/scanner.db`. The database is created automatically on first run.
+Results are stored in SQLite at `data/scanner.db` (created automatically). Scans interrupted by a server restart
+are marked as failed on the next start.
 
-## Notes
+## If it breaks
 
-- **Comments** are loaded by JavaScript (Coral). The app uses Playwright to render the page and then extracts comment text. If the site’s comment markup changes, extraction may need to be updated.
-- **Rate limiting**: The scanner adds delays between requests and between opening article pages to avoid overloading the site.
-- Scans run in a background thread; the dashboard polls for status until the scan finishes.
+The scanner depends on the site's markup and comment API. If scans start returning zero comments:
+
+- Run `python -m scanner <article-url>` on an article you know has comments.
+- If the comment service moved again, open an article in a browser, open DevTools → Network, click the comments
+  button, and look for the GraphQL request; update `CYCLONE_API_URL` / the queries in `scanner/comments.py`.

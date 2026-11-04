@@ -2,41 +2,42 @@
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "scanner.db"
 
 
-def get_db_path() -> Path:
-    return DB_PATH
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 @contextmanager
 def get_connection():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
 
 def _add_column_if_missing(conn, table: str, column: str, col_type: str):
-    """Add column to table if it doesn't exist (for migrations)."""
-    cur = conn.execute(f"PRAGMA table_info({table})")
-    if any(row[1] == column for row in cur.fetchall()):
-        return
-    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
 def init_db():
-    """Create tables if they don't exist."""
+    """Create/migrate tables and mark scans orphaned by a previous shutdown as failed."""
     with get_connection() as conn:
-        conn.execute("""
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.executescript("""
             CREATE TABLE IF NOT EXISTS scans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
@@ -45,9 +46,7 @@ def init_db():
                 articles_found INTEGER DEFAULT 0,
                 comments_found INTEGER DEFAULT 0,
                 error_message TEXT
-            )
-        """)
-        conn.execute("""
+            );
             CREATE TABLE IF NOT EXISTS article_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scan_id INTEGER NOT NULL,
@@ -57,9 +56,7 @@ def init_db():
                 matched_keywords TEXT NOT NULL,
                 article_date TEXT,
                 FOREIGN KEY (scan_id) REFERENCES scans(id)
-            )
-        """)
-        conn.execute("""
+            );
             CREATE TABLE IF NOT EXISTS comment_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scan_id INTEGER NOT NULL,
@@ -72,103 +69,128 @@ def init_db():
                 comment_index INTEGER,
                 total_comments INTEGER,
                 FOREIGN KEY (scan_id) REFERENCES scans(id)
-            )
+            );
         """)
+        _add_column_if_missing(conn, "scans", "progress", "TEXT")
+        _add_column_if_missing(conn, "scans", "articles_scanned", "INTEGER DEFAULT 0")
         _add_column_if_missing(conn, "article_matches", "article_date", "TEXT")
         _add_column_if_missing(conn, "comment_matches", "article_date", "TEXT")
         _add_column_if_missing(conn, "comment_matches", "comment_index", "INTEGER")
         _add_column_if_missing(conn, "comment_matches", "total_comments", "INTEGER")
+        _add_column_if_missing(conn, "comment_matches", "comment_created_at", "TEXT")
+        _add_column_if_missing(conn, "comment_matches", "is_reply", "INTEGER DEFAULT 0")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_article_matches_scan ON article_matches(scan_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_comment_matches_scan ON comment_matches(scan_id)")
+        conn.execute(
+            "UPDATE scans SET status = 'failed', finished_at = ?, error_message = 'Interrupted (server restarted)' "
+            "WHERE status = 'running'",
+            (utc_now(),),
+        )
 
 
 def create_scan() -> int:
-    """Create a new scan record (status=running). Returns scan_id."""
     with get_connection() as conn:
         cur = conn.execute(
-            "INSERT INTO scans (started_at, status) VALUES (?, ?)",
-            (datetime.utcnow().isoformat(), "running")
+            "INSERT INTO scans (started_at, status, progress) VALUES (?, 'running', 'Starting…')",
+            (utc_now(),),
         )
         return cur.lastrowid
 
 
-def finish_scan(scan_id: int, articles_found: int, comments_found: int, error_message: Optional[str] = None):
-    """Mark scan as finished and set counts."""
-    status = "failed" if error_message else "done"
+def update_progress(scan_id: int, progress: str, articles_scanned: int | None = None):
+    with get_connection() as conn:
+        if articles_scanned is None:
+            conn.execute("UPDATE scans SET progress = ? WHERE id = ?", (progress, scan_id))
+        else:
+            conn.execute("UPDATE scans SET progress = ?, articles_scanned = ? WHERE id = ?",
+                         (progress, articles_scanned, scan_id))
+
+
+def finish_scan(scan_id: int, articles_found: int, comments_found: int, error_message: str | None = None):
     with get_connection() as conn:
         conn.execute(
-            """UPDATE scans SET finished_at = ?, status = ?, articles_found = ?, comments_found = ?, error_message = ?
+            """UPDATE scans SET finished_at = ?, status = ?, articles_found = ?, comments_found = ?,
+                   error_message = ?, progress = NULL
                WHERE id = ?""",
-            (datetime.utcnow().isoformat(), status, articles_found, comments_found, error_message, scan_id)
+            (utc_now(), "failed" if error_message else "done", articles_found, comments_found,
+             error_message, scan_id),
         )
 
 
-def add_article_match(scan_id: int, url: str, title: str, snippet_or_body: str, matched_keywords: list[str],
-                      article_date: Optional[str] = None):
-    """Store an article that matched keywords."""
-    keywords_str = ",".join(matched_keywords)
+def add_article_match(scan_id: int, url: str, title: str, snippet: str, matched_keywords: list[str],
+                      article_date: str):
     with get_connection() as conn:
         conn.execute(
             """INSERT INTO article_matches (scan_id, url, title, snippet_or_body, matched_keywords, article_date)
                VALUES (?, ?, ?, ?, ?, ?)""",
-            (scan_id, url, title, snippet_or_body, keywords_str, article_date or "")
+            (scan_id, url, title, snippet, ",".join(matched_keywords), article_date),
         )
 
 
-def add_comment_match(scan_id: int, article_url: str, article_title: str, author: str,
-                      comment_text: str, matched_keywords: list[str], article_date: Optional[str] = None,
-                      comment_index: Optional[int] = None, total_comments: Optional[int] = None):
-    """Store a comment that matched keywords."""
-    keywords_str = ",".join(matched_keywords)
+def add_comment_matches(scan_id: int, rows: list[dict]):
+    if not rows:
+        return
     with get_connection() as conn:
-        conn.execute(
-            """INSERT INTO comment_matches (scan_id, article_url, article_title, author, comment_text, matched_keywords, article_date, comment_index, total_comments)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (scan_id, article_url, article_title, author, comment_text, keywords_str, article_date or "", comment_index, total_comments)
+        conn.executemany(
+            """INSERT INTO comment_matches (scan_id, article_url, article_title, author, comment_text,
+                   matched_keywords, article_date, comment_index, total_comments, comment_created_at, is_reply)
+               VALUES (:scan_id, :article_url, :article_title, :author, :comment_text,
+                   :matched_keywords, :article_date, :comment_index, :total_comments, :comment_created_at, :is_reply)""",
+            [{**r, "scan_id": scan_id, "matched_keywords": ",".join(r["matched_keywords"])} for r in rows],
         )
 
 
-def get_scan(scan_id: int) -> Optional[dict]:
-    """Get a single scan by id."""
+def get_scan(scan_id: int) -> dict | None:
     with get_connection() as conn:
         row = conn.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
-        if row is None:
-            return None
-        return dict(row)
+        return dict(row) if row else None
+
+
+def get_running_scan() -> dict | None:
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM scans WHERE status = 'running' ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
 
 
 def get_scans(limit: int = 20) -> list[dict]:
-    """List recent scans."""
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM scans ORDER BY id DESC LIMIT ?",
-            (limit,)
-        ).fetchall()
+        rows = conn.execute("SELECT * FROM scans ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
 
 
-def delete_all_scans():
-    """Delete all scans and their article/comment matches."""
-    with get_connection() as conn:
-        conn.execute("DELETE FROM comment_matches")
-        conn.execute("DELETE FROM article_matches")
-        conn.execute("DELETE FROM scans")
-
-
 def get_scan_results(scan_id: int) -> dict:
-    """Get article and comment matches for a scan, newest to oldest by article_date."""
+    """Matches for a scan: newest article first, comments in thread order within each article."""
     with get_connection() as conn:
         articles = conn.execute(
             """SELECT url, title, snippet_or_body, matched_keywords, article_date
                FROM article_matches WHERE scan_id = ?
-               ORDER BY article_date IS NULL, article_date DESC""",
-            (scan_id,)
+               ORDER BY article_date IS NULL OR article_date = '', article_date DESC""",
+            (scan_id,),
         ).fetchall()
         comments = conn.execute(
-            """SELECT article_url, article_title, author, comment_text, matched_keywords, article_date, comment_index, total_comments
+            """SELECT article_url, article_title, author, comment_text, matched_keywords, article_date,
+                      comment_index, total_comments, comment_created_at, is_reply
                FROM comment_matches WHERE scan_id = ?
-               ORDER BY article_date IS NULL, article_date DESC""",
-            (scan_id,)
+               ORDER BY article_date IS NULL OR article_date = '', article_date DESC, article_url, comment_index""",
+            (scan_id,),
         ).fetchall()
-        return {
-            "articles": [dict(r) for r in articles],
-            "comments": [dict(r) for r in comments],
-        }
+        return {"articles": [dict(r) for r in articles], "comments": [dict(r) for r in comments]}
+
+
+def delete_scan(scan_id: int) -> bool:
+    """Delete a finished scan and its matches. Running scans are left alone."""
+    with get_connection() as conn:
+        row = conn.execute("SELECT status FROM scans WHERE id = ?", (scan_id,)).fetchone()
+        if row is None or row["status"] == "running":
+            return False
+        conn.execute("DELETE FROM comment_matches WHERE scan_id = ?", (scan_id,))
+        conn.execute("DELETE FROM article_matches WHERE scan_id = ?", (scan_id,))
+        conn.execute("DELETE FROM scans WHERE id = ?", (scan_id,))
+        return True
+
+
+def delete_all_scans():
+    with get_connection() as conn:
+        conn.execute("DELETE FROM comment_matches WHERE scan_id NOT IN (SELECT id FROM scans WHERE status = 'running')")
+        conn.execute("DELETE FROM article_matches WHERE scan_id NOT IN (SELECT id FROM scans WHERE status = 'running')")
+        conn.execute("DELETE FROM scans WHERE status != 'running'")

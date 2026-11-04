@@ -1,90 +1,38 @@
 """
 Blazer's Edge Deni/Avdija Scanner – Flask app and API.
+
+Environment variables:
+  HOST / PORT          bind address (default 127.0.0.1:5000; cloudflared connects to localhost)
+  SCANNER_PASSWORD     if set, starting/deleting scans requires this password
+  KEYWORDS, LOOKBACK_DAYS, MAX_ARTICLES, FETCH_WORKERS   see scanner/config.py
 """
 
+import hmac
 import logging
+import os
 import threading
-from pathlib import Path
+from functools import wraps
 
 from flask import Flask, jsonify, render_template, request
 
-from scanner import storage
-from scanner.crawler import crawl_article_urls
-from scanner.articles import check_article_for_keywords
-from scanner.comments import scrape_comments_for_urls
+from scanner import config, storage
+from scanner.scan import run_scan
 
-app = Flask(__name__)
-app.config["MAX_ARTICLES"] = 80
-app.config["KEYWORDS"] = ["deni", "Deni", "avdija", "Avdija", "Deni Avdija", "deni avdija"]
-
-# In-memory scan status for async runs (scan_id -> "running" | "done" | "failed")
-_scan_status = {}
-_scan_lock = threading.Lock()
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+app = Flask(__name__)
+PASSWORD = os.environ.get("SCANNER_PASSWORD", "")
+_start_lock = threading.Lock()
 
-def run_scan(scan_id: int):
-    """Background task: crawl articles, match keywords, scrape comments, save to DB."""
-    articles_found = 0
-    comments_found = 0
-    error_message = None
-    try:
-        with _scan_lock:
-            _scan_status[scan_id] = "running"
 
-        urls = crawl_article_urls(max_articles=app.config["MAX_ARTICLES"])
-        keywords = app.config["KEYWORDS"]
-        # Only articles from the last week (for comment scraping)
-        article_list_for_comments = []
-
-        for url in urls:
-            try:
-                result, within_week, title, article_date = check_article_for_keywords(
-                    url, keywords=keywords, only_last_week=True
-                )
-                if within_week:
-                    article_list_for_comments.append({"url": url, "title": title or "", "article_date": article_date or ""})
-                if result:
-                    storage.add_article_match(
-                        scan_id,
-                        url=result["url"],
-                        title=result["title"],
-                        snippet_or_body=result["snippet_or_body"],
-                        matched_keywords=result["matched_keywords"],
-                        article_date=result.get("article_date") or "",
-                    )
-                    articles_found += 1
-            except Exception as e:
-                logger.warning("Article %s failed: %s", url, e)
-
-        # Scrape comments only on articles from the last week; filter by keywords in comments
-        try:
-            comment_matches = scrape_comments_for_urls(article_list_for_comments, keywords=keywords)
-            for c in comment_matches:
-                storage.add_comment_match(
-                    scan_id,
-                    article_url=c["article_url"],
-                    article_title=c["article_title"],
-                    author=c["author"],
-                    comment_text=c["comment_text"],
-                    matched_keywords=c["matched_keywords"],
-                    article_date=c.get("article_date") or "",
-                    comment_index=c.get("comment_index"),
-                    total_comments=c.get("total_comments"),
-                )
-                comments_found += 1
-        except Exception as e:
-            logger.warning("Comments scrape failed: %s", e)
-
-    except Exception as e:
-        logger.exception("Scan failed")
-        error_message = str(e)
-    finally:
-        storage.finish_scan(scan_id, articles_found, comments_found, error_message)
-        with _scan_lock:
-            _scan_status[scan_id] = "failed" if error_message else "done"
+def require_password(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if PASSWORD and not hmac.compare_digest(request.headers.get("X-Scanner-Password", ""), PASSWORD):
+            return jsonify({"error": "Password required"}), 401
+        return view(*args, **kwargs)
+    return wrapper
 
 
 @app.route("/")
@@ -92,60 +40,72 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/config")
+def api_config():
+    return jsonify({
+        "keywords": config.KEYWORDS,
+        "lookback_days": config.LOOKBACK_DAYS,
+        "max_articles": config.MAX_ARTICLES,
+        "password_required": bool(PASSWORD),
+    })
+
+
 @app.route("/api/scan", methods=["POST"])
+@require_password
 def api_start_scan():
-    """Start a new scan (runs in background). Returns scan id."""
-    storage.init_db()
-    scan_id = storage.create_scan()
-    thread = threading.Thread(target=run_scan, args=(scan_id,))
-    thread.daemon = True
-    thread.start()
+    with _start_lock:
+        running = storage.get_running_scan()
+        if running:
+            return jsonify({"error": "A scan is already running", "scan_id": running["id"]}), 409
+        scan_id = storage.create_scan()
+    threading.Thread(target=run_scan, args=(scan_id,), daemon=True, name=f"scan-{scan_id}").start()
     return jsonify({"scan_id": scan_id}), 201
 
 
 @app.route("/api/scans")
 def api_list_scans():
-    """List recent scans."""
-    storage.init_db()
-    limit = request.args.get("limit", 20, type=int)
-    scans = storage.get_scans(limit=min(limit, 100))
-    return jsonify({"scans": scans})
+    limit = max(1, min(request.args.get("limit", 20, type=int), 100))
+    return jsonify({"scans": storage.get_scans(limit=limit)})
+
+
+@app.route("/api/scans/<int:scan_id>")
+def api_get_scan(scan_id):
+    scan = storage.get_scan(scan_id)
+    if not scan:
+        return jsonify({"error": "Scan not found"}), 404
+    return jsonify({"scan": scan})
 
 
 @app.route("/api/scans/<int:scan_id>/results")
 def api_scan_results(scan_id):
-    """Get article and comment matches for a scan."""
-    storage.init_db()
     scan = storage.get_scan(scan_id)
     if not scan:
         return jsonify({"error": "Scan not found"}), 404
-    results = storage.get_scan_results(scan_id)
-    return jsonify({"scan": scan, "results": results})
+    return jsonify({"scan": scan, "results": storage.get_scan_results(scan_id)})
+
+
+@app.route("/api/scans/<int:scan_id>", methods=["DELETE"])
+@require_password
+def api_delete_scan(scan_id):
+    if not storage.delete_scan(scan_id):
+        return jsonify({"error": "Scan not found or still running"}), 409
+    return jsonify({"ok": True})
 
 
 @app.route("/api/scans", methods=["DELETE"])
+@require_password
 def api_delete_all_scans():
-    """Delete all scans and their results."""
-    storage.init_db()
     storage.delete_all_scans()
-    return jsonify({"ok": True}), 200
-
-
-@app.route("/api/scans/<int:scan_id>/status")
-def api_scan_status(scan_id):
-    """Get current status of a scan (running / done / failed)."""
-    storage.init_db()
-    scan = storage.get_scan(scan_id)
-    if not scan:
-        return jsonify({"error": "Scan not found"}), 404
-    with _scan_lock:
-        status = _scan_status.get(scan_id, scan.get("status", "unknown"))
-    return jsonify({"scan_id": scan_id, "status": status, "scan": scan})
+    return jsonify({"ok": True})
 
 
 def main():
     storage.init_db()
-    app.run(host="0.0.0.0", debug=True, port=5000, use_reloader=False)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5000"))
+    if not PASSWORD:
+        logger.warning("SCANNER_PASSWORD is not set: anyone with the tunnel URL can start or delete scans")
+    app.run(host=host, port=port, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
