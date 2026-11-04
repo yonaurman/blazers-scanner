@@ -1,4 +1,4 @@
-# Blazer's Edge Deni/Avdija Scanner
+﻿# Blazer's Edge Deni/Avdija Scanner
 
 A dashboard that scans [Blazer's Edge](https://www.blazersedge.com/) for **articles from the last 3 days** and their
 comments that mention **Deni Avdija** (keywords `Deni`, `Avdija`, and the common misspelling `Avidja`), and shows the
@@ -51,7 +51,7 @@ The browser asks for it the first time you click a protected button and remember
 1. Create an empty **public** repo on github.com (Pages is free for public repos), then push:
    ```bash
    git remote add origin https://github.com/<you>/blazers-scanner.git
-   git push -u origin master
+   git push -u origin main
    ```
 2. In the repo: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
 3. **Actions** tab → *Scan and publish* → **Run workflow** for the first run.
