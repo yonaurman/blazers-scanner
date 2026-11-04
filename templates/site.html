@@ -8,16 +8,30 @@
   <script src="results.js"></script>
 </head>
 <body>
-  <h1>Blazer's Edge – Deni/Avdija Scanner</h1>
-  <p class="subtitle">
-    Mentions of {{ keywords | join(', ') }} in Blazer's Edge articles from the last {{ lookback_days }} days and their comments.
-    <br>Last updated <strong id="updated"></strong> · {{ scan.articles_scanned }} articles checked
-    {% if run_url %}· <a href="{{ run_url }}" target="_blank" rel="noopener">run a new scan</a>{% endif %}
-  </p>
+  <header class="page-header">
+    <div>
+      <h1>Blazer's Edge – Deni/Avdija Scanner</h1>
+      <p class="subtitle">
+        Mentions of {{ keywords | join(', ') }} in Blazer's Edge articles from the last {{ lookback_days }} days and their comments.
+      </p>
+    </div>
+    {% if run_url %}<a class="btn btn-primary btn-large" href="{{ run_url }}" target="_blank" rel="noopener">Run new scan ↗</a>{% endif %}
+  </header>
 
-  <div class="actions">
-    <button type="button" class="btn btn-print" id="print-results">Print results</button>
-    <button type="button" class="btn" id="export-csv">Export CSV</button>
+  <div class="toolbar">
+    <span class="muted">Updated <strong id="updated"></strong> · {{ scan.articles_scanned }} articles checked</span>
+    <span class="toolbar-spacer"></span>
+    <details class="menu">
+      <summary class="btn">Export ▾</summary>
+      <div class="menu-items">
+        <button type="button" id="export-csv">Download CSV</button>
+        <button type="button" id="print-results">Print</button>
+      </div>
+    </details>
+  </div>
+
+  <div class="banner banner-warn" id="stale-banner" hidden>
+    These results haven't been refreshed in a while; the scheduled scan may be failing.
   </div>
 
 {% with hidden = false %}{% include "_results.html" %}{% endwith %}
@@ -25,7 +39,15 @@
   <script id="scan-data" type="application/json">{{ payload | tojson }}</script>
   <script>
     const data = JSON.parse(document.getElementById('scan-data').textContent);
-    document.getElementById('updated').textContent = Results.fmtDateTime(data.scan.finished_at);
+    const updated = document.getElementById('updated');
+    const showAge = () => {
+      updated.textContent = Results.fmtRelative(data.scan.finished_at);
+      updated.title = Results.fmtDateTime(data.scan.finished_at);
+      // The workflow runs every 3 hours; allow a couple of missed runs before warning.
+      document.getElementById('stale-banner').hidden = !(Results.ageHours(data.scan.finished_at) > 8);
+    };
+    showAge();
+    setInterval(showAge, 60000);
     document.getElementById('print-results').addEventListener('click', () => window.print());
     document.getElementById('export-csv').addEventListener('click', () =>
       Results.exportCsv(`blazers-scan-${(data.scan.finished_at || '').slice(0, 10)}.csv`));
