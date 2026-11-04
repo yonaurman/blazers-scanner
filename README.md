@@ -44,6 +44,22 @@ setx SCANNER_PASSWORD "choose-a-password"
 
 The browser asks for it the first time you click a protected button and remembers it.
 
+## Hosted version (GitHub Pages, no server)
+
+`.github/workflows/scan.yml` runs a scan every 3 hours and publishes the results as a static page.
+
+1. Create an empty **public** repo on github.com (Pages is free for public repos), then push:
+   ```bash
+   git remote add origin https://github.com/<you>/blazers-scanner.git
+   git push -u origin master
+   ```
+2. In the repo: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+3. **Actions** tab → *Scan and publish* → **Run workflow** for the first run.
+
+The page is at `https://<you>.github.io/blazers-scanner/`. To scan on demand, use **Run workflow** again
+(the page links to it). Change the schedule by editing the `cron` line. To build the page locally:
+`python -m scanner.site --out site`.
+
 ## Command line
 
 ```bash
