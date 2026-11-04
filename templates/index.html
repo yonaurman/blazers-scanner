@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blazer's Edge – Deni/Avdija Scanner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <h1>Blazer's Edge – Deni/Avdija Scanner</h1>
+  <p class="subtitle">Scan articles and comments on Blazer's Edge for mentions of "Deni" or "Avdija".</p>
+
+  <div class="actions">
+    <button type="button" class="btn btn-primary" id="run-scan">Run new scan</button>
+    <button type="button" class="btn btn-print" id="print-results" style="display: none;">Print results</button>
+    <button type="button" class="btn" id="export-csv" style="display: none;">Export CSV</button>
+    <button type="button" class="btn btn-danger" id="delete-all-scans">Delete all scans</button>
+    <span class="status-msg" id="status-msg"></span>
+  </div>
+
+  <section class="scans-section">
+    <h2>Recent scans</h2>
+    <ul class="scan-list" id="scan-list"></ul>
+  </section>
+
+  <div class="results-panel" id="results-panel" style="display: none;">
+    <h3>Matching articles <span class="sort-hint">(newest first)</span></h3>
+    <div class="table-wrap">
+      <table id="articles-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Title</th>
+            <th>URL</th>
+            <th>Snippet</th>
+            <th>Keywords</th>
+          </tr>
+        </thead>
+        <tbody id="articles-body"></tbody>
+      </table>
+    </div>
+    <h3>Matching comments <span class="sort-hint">(newest first by article)</span></h3>
+    <div class="table-wrap">
+      <table id="comments-table">
+        <thead>
+          <tr>
+            <th>Article date</th>
+            <th>Article</th>
+            <th>Comment #</th>
+            <th>Author</th>
+            <th>Comment</th>
+            <th>Keywords</th>
+          </tr>
+        </thead>
+        <tbody id="comments-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status-msg');
+    const scanListEl = document.getElementById('scan-list');
+    const resultsPanel = document.getElementById('results-panel');
+    const articlesBody = document.getElementById('articles-body');
+    const commentsBody = document.getElementById('comments-body');
+    const printBtn = document.getElementById('print-results');
+    const exportBtn = document.getElementById('export-csv');
+
+    let selectedScanId = null;
+    let pollInterval = null;
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function escapeHtml(s) {
+      if (!s) return '';
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    function renderKeywords(keywordsStr) {
+      if (!keywordsStr) return '';
+      const list = keywordsStr.split(',').map(k => k.trim()).filter(Boolean);
+      return list.map(k => `<span>${escapeHtml(k)}</span>`).join('');
+    }
+
+    function highlightKeywords(text, keywordsStr) {
+      if (!text) return '';
+      if (!keywordsStr) return escapeHtml(text);
+      const keywords = keywordsStr.split(',').map(k => k.trim()).filter(Boolean);
+      if (keywords.length === 0) return escapeHtml(text);
+      // Build a regex that matches any keyword (case-insensitive, whole occurrences)
+      const pattern = keywords
+        .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+      const re = new RegExp('(' + pattern + ')', 'gi');
+      // Split on matches, escape each part, wrap matches in <mark>
+      return text.split(re).map((part, i) =>
+        i % 2 === 1
+          ? `<mark class="kw-highlight">${escapeHtml(part)}</mark>`
+          : escapeHtml(part)
+      ).join('');
+    }
+
+    function formatArticleDate(isoOrDateStr) {
+      if (!isoOrDateStr) return '—';
+      try {
+        const d = new Date(isoOrDateStr);
+        if (isNaN(d.getTime())) return isoOrDateStr;
+        return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+      } catch (e) {
+        return isoOrDateStr;
+      }
+    }
+
+    function loadScans() {
+      fetch('/api/scans')
+        .then(r => r.json())
+        .then(data => {
+          scanListEl.innerHTML = '';
+          if (!data.scans || data.scans.length === 0) {
+            scanListEl.innerHTML = '<li class="scan-item" style="cursor:default;">No scans yet. Click "Run new scan" to start.</li>';
+            return;
+          }
+          data.scans.forEach(scan => {
+            const li = document.createElement('li');
+            li.className = 'scan-item' + (selectedScanId === scan.id ? ' selected' : '');
+            li.dataset.scanId = scan.id;
+            const date = scan.started_at ? new Date(scan.started_at).toLocaleString() : '—';
+            const badge = scan.status === 'running' ? 'running' : (scan.status === 'failed' ? 'failed' : 'done');
+            li.innerHTML = `
+              <div>
+                <strong>Scan #${scan.id}</strong> — ${date}
+                <div class="meta">Articles: ${scan.articles_found ?? '—'}, Comments: ${scan.comments_found ?? '—'}</div>
+              </div>
+              <span class="badge ${badge}">${scan.status}</span>
+            `;
+            li.addEventListener('click', () => selectScan(scan.id));
+            scanListEl.appendChild(li);
+          });
+        })
+        .catch(() => setStatus('Failed to load scans.'));
+    }
+
+    function selectScan(scanId) {
+      selectedScanId = scanId;
+      document.querySelectorAll('.scan-item').forEach(el => {
+        el.classList.toggle('selected', parseInt(el.dataset.scanId, 10) === scanId);
+      });
+      loadResults(scanId);
+      resultsPanel.style.display = 'block';
+      printBtn.style.display = 'inline-flex';
+      exportBtn.style.display = 'inline-flex';
+    }
+
+    function loadResults(scanId) {
+      setStatus('Loading results…');
+      fetch(`/api/scans/${scanId}/results`)
+        .then(r => r.json())
+        .then(data => {
+          setStatus('');
+          const { results } = data;
+          articlesBody.innerHTML = '';
+          if (results.articles && results.articles.length > 0) {
+            results.articles.forEach(a => {
+              const tr = document.createElement('tr');
+              const dateStr = a.article_date ? formatArticleDate(a.article_date) : '—';
+              tr.innerHTML = `
+                <td class="date-cell">${escapeHtml(dateStr)}</td>
+                <td><strong>${escapeHtml(a.title)}</strong></td>
+                <td><a href="${escapeHtml(a.url)}" target="_blank" rel="noopener">Open</a></td>
+                <td class="snippet">${escapeHtml(a.snippet_or_body || '')}</td>
+                <td><div class="keywords">${renderKeywords(a.matched_keywords)}</div></td>
+              `;
+              articlesBody.appendChild(tr);
+            });
+          } else {
+            articlesBody.innerHTML = '<tr><td colspan="5" class="empty">No matching articles.</td></tr>';
+          }
+          commentsBody.innerHTML = '';
+          if (results.comments && results.comments.length > 0) {
+            results.comments.forEach(c => {
+              const tr = document.createElement('tr');
+              const dateStr = c.article_date ? formatArticleDate(c.article_date) : '—';
+              const commentNum = c.comment_index != null
+                ? (c.total_comments != null ? (c.comment_index + ' of ' + c.total_comments) : ('#' + c.comment_index))
+                : '—';
+              tr.innerHTML = `
+                <td class="date-cell">${escapeHtml(dateStr)}</td>
+                <td><a href="${escapeHtml(c.article_url)}" target="_blank" rel="noopener">${escapeHtml(c.article_title || 'Article')}</a></td>
+                <td>${escapeHtml(commentNum)}</td>
+                <td>${escapeHtml(c.author)}</td>
+                <td class="snippet">${highlightKeywords(c.comment_text, c.matched_keywords)}</td>
+                <td><div class="keywords">${renderKeywords(c.matched_keywords)}</div></td>
+              `;
+              commentsBody.appendChild(tr);
+            });
+          } else {
+            commentsBody.innerHTML = '<tr><td colspan="6" class="empty">No matching comments.</td></tr>';
+          }
+        })
+        .catch(() => setStatus('Failed to load results.'));
+    }
+
+    function startScan() {
+      const btn = document.getElementById('run-scan');
+      btn.disabled = true;
+      setStatus('Starting scan…');
+      fetch('/api/scan', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+          const scanId = data.scan_id;
+          setStatus('Scan #' + scanId + ' running. This may take a few minutes.');
+          loadScans();
+          pollInterval = setInterval(() => {
+            fetch(`/api/scans/${scanId}/status`)
+              .then(r => r.json())
+              .then(s => {
+                if (s.status !== 'running') {
+                  clearInterval(pollInterval);
+                  pollInterval = null;
+                  btn.disabled = false;
+                  setStatus('Scan finished.');
+                  loadScans();
+                  selectScan(scanId);
+                }
+              });
+          }, 3000);
+        })
+        .catch(() => {
+          btn.disabled = false;
+          setStatus('Failed to start scan.');
+        });
+    }
+
+    function printResults() {
+      window.print();
+    }
+
+    function exportCsv() {
+      if (!selectedScanId) return;
+      fetch(`/api/scans/${selectedScanId}/results`)
+        .then(r => r.json())
+        .then(data => {
+          const rows = [];
+          rows.push('Type,Date,Title/Article,URL/Author,Comment #,Content,Keywords');
+          (data.results.articles || []).forEach(a => {
+            rows.push(`Article,${csvCell(a.article_date || '')},${csvCell(a.title)},${csvCell(a.url)},,${csvCell(a.snippet_or_body)},${csvCell(a.matched_keywords)}`);
+          });
+          (data.results.comments || []).forEach(c => {
+            const commentNum = c.comment_index != null
+              ? (c.total_comments != null ? (c.comment_index + ' of ' + c.total_comments) : ('#' + c.comment_index))
+              : '';
+            rows.push(`Comment,${csvCell(c.article_date || '')},${csvCell(c.article_title)},${csvCell(c.author)},${csvCell(commentNum)},${csvCell(c.comment_text)},${csvCell(c.matched_keywords)}`);
+          });
+          const blob = new Blob([rows.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `blazers-scan-${selectedScanId}.csv`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        });
+    }
+
+    function csvCell(s) {
+      if (s == null) return '';
+      const t = String(s).replace(/"/g, '""');
+      return `"${t}"`;
+    }
+
+    function deleteAllScans() {
+      if (!confirm('Delete all scans and their results? This cannot be undone.')) return;
+      setStatus('Deleting…');
+      fetch('/api/scans', { method: 'DELETE' })
+        .then(r => {
+          if (!r.ok) throw new Error('Delete failed');
+          return r.json();
+        })
+        .then(() => {
+          setStatus('All scans deleted.');
+          selectedScanId = null;
+          resultsPanel.style.display = 'none';
+          printBtn.style.display = 'none';
+          exportBtn.style.display = 'none';
+          loadScans();
+        })
+        .catch(() => setStatus('Failed to delete scans.'));
+    }
+
+    document.getElementById('run-scan').addEventListener('click', startScan);
+    document.getElementById('delete-all-scans').addEventListener('click', deleteAllScans);
+    printBtn.addEventListener('click', printResults);
+    exportBtn.addEventListener('click', exportCsv);
+
+    loadScans();
+  </script>
+</body>
+</html>
