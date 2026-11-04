@@ -4,3 +4,4 @@ venv/
 .venv/
 data/
 debug_out/
+site/

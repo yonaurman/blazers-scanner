@@ -1,0 +1,24 @@
+  <div class="results-panel" id="results-panel"{% if hidden %} hidden{% endif %}>
+    <h3>Matching articles <span class="sort-hint" id="articles-count"></span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Date</th><th>Title</th><th>Snippet</th><th>Keywords</th></tr>
+        </thead>
+        <tbody id="articles-body"></tbody>
+      </table>
+    </div>
+
+    <div class="comments-header">
+      <h3>Matching comments <span class="sort-hint" id="comments-count"></span></h3>
+      <input type="search" id="comment-filter" class="filter-input" placeholder="Filter by author, article or text…">
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Article</th><th>Comment #</th><th>Posted</th><th>Author</th><th>Comment</th></tr>
+        </thead>
+        <tbody id="comments-body"></tbody>
+      </table>
+    </div>
+  </div>

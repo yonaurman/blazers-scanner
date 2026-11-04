@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blazer's Edge – Deni/Avdija Scanner</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="results.js"></script>
+</head>
+<body>
+  <h1>Blazer's Edge – Deni/Avdija Scanner</h1>
+  <p class="subtitle">
+    Mentions of {{ keywords | join(', ') }} in Blazer's Edge articles from the last {{ lookback_days }} days and their comments.
+    <br>Last updated <strong id="updated"></strong> · {{ scan.articles_scanned }} articles checked
+    {% if run_url %}· <a href="{{ run_url }}" target="_blank" rel="noopener">run a new scan</a>{% endif %}
+  </p>
+
+  <div class="actions">
+    <button type="button" class="btn btn-print" id="print-results">Print results</button>
+    <button type="button" class="btn" id="export-csv">Export CSV</button>
+  </div>
+
+{% with hidden = false %}{% include "_results.html" %}{% endwith %}
+
+  <script id="scan-data" type="application/json">{{ payload | tojson }}</script>
+  <script>
+    const data = JSON.parse(document.getElementById('scan-data').textContent);
+    document.getElementById('updated').textContent = Results.fmtDateTime(data.scan.finished_at);
+    document.getElementById('print-results').addEventListener('click', () => window.print());
+    document.getElementById('export-csv').addEventListener('click', () =>
+      Results.exportCsv(`blazers-scan-${(data.scan.finished_at || '').slice(0, 10)}.csv`));
+    document.addEventListener('DOMContentLoaded', () => Results.render(data.results));
+  </script>
+</body>
+</html>
