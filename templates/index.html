@@ -8,43 +8,119 @@
   <script src="{{ url_for('static', filename='results.js') }}"></script>
 </head>
 <body>
-  <h1>Blazer's Edge – Deni/Avdija Scanner</h1>
-  <p class="subtitle" id="subtitle">Scan recent Blazer's Edge articles and comments for mentions of Deni Avdija.</p>
+  <header class="page-header">
+    <div>
+      <h1>Blazer's Edge – Deni/Avdija Scanner</h1>
+      <p class="subtitle" id="subtitle">Scan recent Blazer's Edge articles and comments for mentions of Deni Avdija.</p>
+    </div>
+    <button type="button" class="btn btn-primary btn-large" id="run-scan">Run new scan</button>
+  </header>
 
-  <div class="actions">
-    <button type="button" class="btn btn-primary" id="run-scan">Run new scan</button>
-    <button type="button" class="btn btn-print" id="print-results" hidden>Print results</button>
-    <button type="button" class="btn" id="export-csv" hidden>Export CSV</button>
-    <button type="button" class="btn btn-danger" id="delete-all-scans">Delete all scans</button>
-    <span class="status-msg" id="status-msg" role="status"></span>
+  <div class="progress-card" id="progress" hidden>
+    <div class="progress-head">
+      <strong id="progress-title">Scan running</strong>
+      <span class="muted" id="progress-text"></span>
+    </div>
+    <div class="progress-track" id="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+      <div class="progress-fill" id="progress-fill"></div>
+    </div>
   </div>
 
-  <section class="scans-section">
-    <h2>Recent scans</h2>
-    <ul class="scan-list" id="scan-list"></ul>
-  </section>
+  <div class="toolbar" id="toolbar" hidden>
+    <label class="scan-picker">
+      <span class="muted">Showing</span>
+      <select id="scan-select" class="select"></select>
+    </label>
+    <span class="freshness muted" id="freshness"></span>
+    <span class="toolbar-spacer"></span>
+    <details class="menu">
+      <summary class="btn">Export ▾</summary>
+      <div class="menu-items">
+        <button type="button" id="export-csv">Download CSV</button>
+        <button type="button" id="print-results">Print</button>
+      </div>
+    </details>
+    <details class="menu">
+      <summary class="btn" title="More actions" aria-label="More actions">⋯</summary>
+      <div class="menu-items">
+        <button type="button" class="danger" id="delete-scan">Delete this scan</button>
+        <button type="button" class="danger" id="delete-all-scans">Delete all scans…</button>
+      </div>
+    </details>
+  </div>
+
+  <div class="banner banner-warn" id="stale-banner" hidden>
+    <span id="stale-text"></span>
+    <button type="button" class="btn btn-small" id="stale-run">Run new scan</button>
+  </div>
+  <div class="banner banner-error" id="failed-banner" hidden></div>
+
+  <div class="empty-state" id="empty-state" hidden>
+    <p><strong>No scans yet.</strong></p>
+    <p class="muted">Run a scan to find mentions in recent articles and their comments. It usually takes under a minute.</p>
+  </div>
 
 {% with hidden = true %}{% include "_results.html" %}{% endwith %}
 
+  <dialog id="dialog">
+    <form method="dialog">
+      <h2 id="dialog-title"></h2>
+      <p id="dialog-message"></p>
+      <input type="password" id="dialog-input" class="filter-input" autocomplete="current-password" hidden>
+      <div class="dialog-actions">
+        <button value="ok" class="btn btn-primary" id="dialog-ok">OK</button>
+        <button value="cancel" class="btn" formnovalidate>Cancel</button>
+      </div>
+    </form>
+  </dialog>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
   <script>
     const $ = id => document.getElementById(id);
-    const { escapeHtml, fmtDateTime } = Results;
-    const statusEl = $('status-msg');
-    const runBtn = $('run-scan');
-    const state = { selectedScanId: null, pollTimer: null };
+    const { escapeHtml, fmtDateTime, fmtRelative, ageHours } = Results;
+    const STALE_HOURS = 6;
+    const runBtns = [$('run-scan'), $('stale-run')];
+    const state = { scans: [], selectedScanId: null, pollTimer: null, resultsCache: new Map() };
 
-    function setStatus(msg) { statusEl.textContent = msg || ''; }
+    function toast(message, type = 'info') {
+      const el = document.createElement('div');
+      el.className = `toast toast-${type}`;
+      el.textContent = message;
+      $('toasts').appendChild(el);
+      setTimeout(() => { el.classList.add('leaving'); setTimeout(() => el.remove(), 300); }, type === 'error' ? 7000 : 4000);
+    }
+
+    // Resolves to true / the typed text on OK, null on Cancel or Escape.
+    function openDialog({ title, message = '', okLabel = 'OK', danger = false, input = false }) {
+      const dlg = $('dialog'), inp = $('dialog-input'), ok = $('dialog-ok');
+      $('dialog-title').textContent = title;
+      $('dialog-message').textContent = message;
+      inp.hidden = !input;
+      inp.value = '';
+      ok.textContent = okLabel;
+      ok.className = `btn ${danger ? 'btn-danger' : 'btn-primary'}`;
+      dlg.returnValue = '';
+      return new Promise(resolve => {
+        dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok' ? (input ? inp.value : true) : null), { once: true });
+        dlg.showModal();
+        (input ? inp : ok).focus();
+      });
+    }
 
     function authHeaders() {
       const pw = localStorage.getItem('scannerPassword');
       return pw ? { 'X-Scanner-Password': pw } : {};
     }
 
-    // fetch wrapper for state-changing calls: prompts for the password on 401 and retries once.
+    // fetch wrapper: asks for the password on 401 and retries once.
     async function api(url, options = {}, retried = false) {
       const res = await fetch(url, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
       if (res.status === 401 && !retried) {
-        const pw = prompt('Password required:');
+        const pw = await openDialog({
+          title: 'Password required',
+          message: 'Starting or deleting scans needs the scanner password. It will be remembered in this browser.',
+          okLabel: 'Continue', input: true,
+        });
         if (pw === null) throw new Error('Cancelled');
         localStorage.setItem('scannerPassword', pw);
         return api(url, options, true);
@@ -58,76 +134,113 @@
       try {
         const cfg = await api('/api/config');
         $('subtitle').textContent =
-          `Scans articles from the last ${cfg.lookback_days} days (up to ${cfg.max_articles}) and their comments ` +
-          `for: ${cfg.keywords.join(', ')}.`;
+          `Articles from the last ${cfg.lookback_days} days (up to ${cfg.max_articles}) and their comments, ` +
+          `searched for ${cfg.keywords.join(', ')}.`;
       } catch (e) { /* keep default subtitle */ }
     }
 
+    function scanLabel(scan) {
+      const when = fmtDateTime(scan.started_at);
+      if (scan.status === 'running') return `Scan #${scan.id} · ${when} · running…`;
+      if (scan.status === 'failed') return `Scan #${scan.id} · ${when} · failed`;
+      return `Scan #${scan.id} · ${when} · ${scan.articles_found ?? 0} articles, ${scan.comments_found ?? 0} comments`;
+    }
+
     async function loadScans() {
-      let data;
-      try { data = await api('/api/scans'); } catch (e) { setStatus('Failed to load scans.'); return; }
-      const list = $('scan-list');
-      list.innerHTML = '';
-      if (!data.scans.length) {
-        list.innerHTML = '<li class="scan-item empty-item">No scans yet. Click "Run new scan" to start.</li>';
-        return data.scans;
+      try { state.scans = (await api('/api/scans')).scans; } catch (e) { toast('Could not load scans.', 'error'); return state.scans; }
+      const select = $('scan-select');
+      select.innerHTML = state.scans.map(s => `<option value="${s.id}">${escapeHtml(scanLabel(s))}</option>`).join('');
+      if (state.selectedScanId != null) select.value = state.selectedScanId;
+      $('toolbar').hidden = !state.scans.length;
+      $('empty-state').hidden = state.scans.length > 0 || !$('progress').hidden;
+      updateFreshness();
+      return state.scans;
+    }
+
+    function updateFreshness() {
+      const selected = state.scans.find(s => s.id === state.selectedScanId);
+      $('freshness').textContent = selected?.finished_at ? `Finished ${fmtRelative(selected.finished_at)}` : '';
+      $('freshness').title = selected?.finished_at ? fmtDateTime(selected.finished_at) : '';
+
+      const latestDone = state.scans.find(s => s.status === 'done');
+      const age = latestDone ? ageHours(latestDone.finished_at) : null;
+      const running = state.scans.some(s => s.status === 'running');
+      $('stale-banner').hidden = running || age == null || age < STALE_HOURS;
+      if (age != null) $('stale-text').textContent =
+        `The latest results are ${age < 48 ? `${Math.round(age)} hours` : `${Math.round(age / 24)} days`} old, ` +
+        'so newer comments are missing.';
+    }
+
+    async function fetchResults(scanId) {
+      if (!state.resultsCache.has(scanId)) {
+        const data = await api(`/api/scans/${scanId}/results`);
+        const scan = state.scans.find(s => s.id === scanId);
+        if (scan && scan.status !== 'running') state.resultsCache.set(scanId, data.results);
+        return data.results;
       }
-      for (const scan of data.scans) {
-        const li = document.createElement('li');
-        li.className = 'scan-item' + (state.selectedScanId === scan.id ? ' selected' : '');
-        li.dataset.scanId = scan.id;
-        const detail = scan.status === 'running'
-          ? escapeHtml(scan.progress || 'Running…')
-          : scan.status === 'failed'
-            ? `<span class="error-text">${escapeHtml(scan.error_message || 'Failed')}</span>`
-            : `Articles: ${scan.articles_found ?? 0} · Comments: ${scan.comments_found ?? 0}`;
-        li.innerHTML = `
-          <div>
-            <strong>Scan #${scan.id}</strong> — ${escapeHtml(fmtDateTime(scan.started_at))}
-            <div class="meta">${detail}</div>
-          </div>
-          <div class="scan-item-actions">
-            <span class="badge ${escapeHtml(scan.status)}">${escapeHtml(scan.status)}</span>
-            ${scan.status !== 'running' ? '<button type="button" class="icon-btn" title="Delete scan" aria-label="Delete scan">✕</button>' : ''}
-          </div>`;
-        li.addEventListener('click', () => selectScan(scan.id));
-        li.querySelector('.icon-btn')?.addEventListener('click', ev => { ev.stopPropagation(); deleteScan(scan.id); });
-        list.appendChild(li);
-      }
-      return data.scans;
+      return state.resultsCache.get(scanId);
     }
 
     async function selectScan(scanId) {
       state.selectedScanId = scanId;
-      document.querySelectorAll('.scan-item').forEach(el =>
-        el.classList.toggle('selected', Number(el.dataset.scanId) === scanId));
-      setStatus('Loading results…');
+      $('scan-select').value = scanId;
+      const scan = state.scans.find(s => s.id === scanId);
+      $('failed-banner').hidden = scan?.status !== 'failed';
+      $('failed-banner').textContent = `This scan failed: ${scan?.error_message || 'unknown error'}. Results below may be incomplete.`;
+      $('delete-scan').disabled = scan?.status === 'running';
+      updateFreshness();
       try {
-        const data = await api(`/api/scans/${scanId}/results`);
-        Results.render(data.results);
+        const results = await fetchResults(scanId);
+        const prev = state.scans.find(s => s.id < scanId && s.status === 'done');
+        const previous = prev ? await fetchResults(prev.id).catch(() => null) : null;
+        if (state.selectedScanId !== scanId) return;
+        Results.render(results, { previous });
         $('results-panel').hidden = false;
-        $('print-results').hidden = $('export-csv').hidden = false;
-        setStatus('');
       } catch (e) {
-        setStatus('Failed to load results.');
+        toast('Could not load results for this scan.', 'error');
       }
+    }
+
+    function showProgress(scan) {
+      $('progress').hidden = false;
+      $('empty-state').hidden = true;
+      $('progress-title').textContent = `Scan #${scan.id} running`;
+      $('progress-text').textContent = scan.progress || 'Starting…';
+      const m = /Checked (\d+)\/(\d+)/.exec(scan.progress || '');
+      const track = $('progress-track');
+      track.classList.toggle('indeterminate', !m);
+      if (m) {
+        const pct = Math.round(100 * Number(m[1]) / Number(m[2]));
+        $('progress-fill').style.width = `${pct}%`;
+        track.setAttribute('aria-valuenow', pct);
+      } else {
+        $('progress-fill').style.width = '';
+        track.removeAttribute('aria-valuenow');
+      }
+    }
+
+    function setRunning(running) {
+      runBtns.forEach(b => {
+        b.disabled = running;
+        b.textContent = running ? 'Scanning…' : 'Run new scan';
+      });
     }
 
     function pollScan(scanId) {
       clearTimeout(state.pollTimer);
-      runBtn.disabled = true;
+      setRunning(true);
       const tick = async () => {
         try {
           const { scan } = await api(`/api/scans/${scanId}`);
           if (scan.status === 'running') {
-            setStatus(`Scan #${scanId}: ${scan.progress || 'running…'}`);
-            const li = document.querySelector(`.scan-item[data-scan-id="${scanId}"] .meta`);
-            if (li) li.textContent = scan.progress || 'Running…';
+            showProgress(scan);
             state.pollTimer = setTimeout(tick, 2000);
             return;
           }
-          runBtn.disabled = false;
-          setStatus(scan.status === 'failed' ? `Scan #${scanId} failed: ${scan.error_message}` : `Scan #${scanId} finished.`);
+          setRunning(false);
+          $('progress').hidden = true;
+          if (scan.status === 'failed') toast(`Scan #${scanId} failed: ${scan.error_message}`, 'error');
+          else toast(`Scan #${scanId} finished: ${scan.articles_found} articles, ${scan.comments_found} comments.`, 'success');
           await loadScans();
           selectScan(scanId);
         } catch (e) {
@@ -138,54 +251,78 @@
     }
 
     async function startScan() {
-      runBtn.disabled = true;
-      setStatus('Starting scan…');
+      setRunning(true);
       try {
         const { scan_id } = await api('/api/scan', { method: 'POST' });
+        showProgress({ id: scan_id });
         await loadScans();
         pollScan(scan_id);
       } catch (e) {
         if (e.status === 409 && e.data?.scan_id) { pollScan(e.data.scan_id); return; }
-        runBtn.disabled = false;
-        setStatus(e.message === 'Cancelled' ? '' : `Failed to start scan: ${e.message}`);
+        setRunning(false);
+        if (e.message !== 'Cancelled') toast(`Could not start the scan: ${e.message}`, 'error');
       }
     }
 
     function clearSelection() {
       state.selectedScanId = null;
-      $('results-panel').hidden = true;
-      $('print-results').hidden = $('export-csv').hidden = true;
+      $('results-panel').hidden = $('failed-banner').hidden = true;
     }
 
-    async function deleteScan(scanId) {
-      if (!confirm(`Delete scan #${scanId}?`)) return;
+    async function afterDelete() {
+      const scans = await loadScans();
+      const next = scans.find(s => s.status !== 'running') || scans[0];
+      if (next) selectScan(next.id);
+    }
+
+    async function deleteScan() {
+      const scanId = state.selectedScanId;
+      if (scanId == null) return;
+      const ok = await openDialog({
+        title: `Delete scan #${scanId}?`, message: 'Its results will be removed. This cannot be undone.',
+        okLabel: 'Delete', danger: true,
+      });
+      if (!ok) return;
       try {
         await api(`/api/scans/${scanId}`, { method: 'DELETE' });
-        if (state.selectedScanId === scanId) clearSelection();
-        loadScans();
-      } catch (e) { if (e.message !== 'Cancelled') setStatus(`Delete failed: ${e.message}`); }
+        state.resultsCache.delete(scanId);
+        clearSelection();
+        toast(`Scan #${scanId} deleted.`);
+        afterDelete();
+      } catch (e) { if (e.message !== 'Cancelled') toast(`Delete failed: ${e.message}`, 'error'); }
     }
 
     async function deleteAllScans() {
-      if (!confirm('Delete all finished scans and their results? This cannot be undone.')) return;
+      const count = state.scans.filter(s => s.status !== 'running').length;
+      const ok = await openDialog({
+        title: 'Delete all scans?',
+        message: `All ${count} finished scans and their results will be removed. This cannot be undone.`,
+        okLabel: 'Delete all', danger: true,
+      });
+      if (!ok) return;
       try {
         await api('/api/scans', { method: 'DELETE' });
+        state.resultsCache.clear();
         clearSelection();
-        setStatus('All finished scans deleted.');
-        loadScans();
-      } catch (e) { if (e.message !== 'Cancelled') setStatus(`Delete failed: ${e.message}`); }
+        toast('All finished scans deleted.');
+        afterDelete();
+      } catch (e) { if (e.message !== 'Cancelled') toast(`Delete failed: ${e.message}`, 'error'); }
     }
 
-    runBtn.addEventListener('click', startScan);
+    runBtns.forEach(b => b.addEventListener('click', startScan));
+    $('scan-select').addEventListener('change', ev => selectScan(Number(ev.target.value)));
+    $('delete-scan').addEventListener('click', deleteScan);
     $('delete-all-scans').addEventListener('click', deleteAllScans);
     $('print-results').addEventListener('click', () => window.print());
     $('export-csv').addEventListener('click', () => Results.exportCsv(`blazers-scan-${state.selectedScanId}.csv`));
+    setInterval(updateFreshness, 60000);
 
     loadConfig();
     loadScans().then(scans => {
-      const running = scans?.find(s => s.status === 'running');
-      if (running) pollScan(running.id);
-      else if (scans?.length) selectScan(scans[0].id);
+      const running = scans.find(s => s.status === 'running');
+      if (running) { showProgress(running); pollScan(running.id); }
+      const shown = scans.find(s => s.status !== 'running');
+      if (shown) selectScan(shown.id);
     });
   </script>
 </body>
