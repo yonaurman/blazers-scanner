@@ -17,6 +17,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from . import config, storage
 from .scan import run_scan
+from .stats import fetch_player_stats
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,7 +36,8 @@ def build(out_dir: Path) -> int:
         return 1
 
     repo = os.environ.get("GITHUB_REPOSITORY")
-    payload = {"scan": scan, "results": results}
+    # Stats are a bonus: if ESPN is unreachable the page is still published, just without the panel.
+    payload = {"scan": scan, "results": results, "player": fetch_player_stats()}
     env = Environment(loader=FileSystemLoader(ROOT / "templates"), autoescape=select_autoescape())
     html = env.get_template("site.html").render(
         payload=payload,
@@ -48,7 +50,7 @@ def build(out_dir: Path) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(html, encoding="utf-8")
     (out_dir / "results.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-    for name in ("style.css", "results.js"):
+    for name in ("style.css", "results.js", "player.js"):
         shutil.copy(ROOT / "static" / name, out_dir / name)
     logging.info("Wrote %s: %d article and %d comment matches",
                  out_dir / "index.html", len(results["articles"]), len(results["comments"]))

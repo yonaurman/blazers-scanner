@@ -16,6 +16,10 @@ results in a web UI.
 
 A full scan takes well under a minute.
 
+Above the results, a **season stats** panel shows Deni's per-game averages (with a last-5-games comparison) and
+his recent game log, pulled from ESPN's public game log. Averages are computed from the individual game lines.
+If ESPN is unreachable the panel is hidden and everything else keeps working.
+
 ## Setup
 
 Requires Python 3.10+.
@@ -77,6 +81,8 @@ All settings are environment variables (defaults in `scanner/config.py`):
 | `LOOKBACK_DAYS`    | `3`                    | Only articles newer than this are scanned  |
 | `MAX_ARTICLES`     | `80`                   | Max article links to check                 |
 | `FETCH_WORKERS`    | `4`                    | Parallel article fetches                   |
+| `PLAYER_ESPN_ID`   | `4683021`              | ESPN athlete id for the stats panel        |
+| `PLAYER_STATS_RECENT_GAMES` | `5`           | Games in the "Last N" comparison           |
 | `SCANNER_PASSWORD` | *(unset)*              | Required to start/delete scans when set    |
 | `HOST` / `PORT`    | `127.0.0.1` / `5000`   | Bind address                               |
 

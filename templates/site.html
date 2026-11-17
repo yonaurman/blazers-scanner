@@ -6,6 +6,7 @@
   <title>Blazer's Edge – Deni/Avdija Scanner</title>
   <link rel="stylesheet" href="style.css">
   <script src="results.js"></script>
+  <script src="player.js"></script>
 </head>
 <body>
   <header class="page-header">
@@ -34,6 +35,8 @@
     These results haven't been refreshed in a while; the scheduled scan may be failing.
   </div>
 
+{% include "_player.html" %}
+
 {% with hidden = false %}{% include "_results.html" %}{% endwith %}
 
   <script id="scan-data" type="application/json">{{ payload | tojson }}</script>
@@ -51,7 +54,10 @@
     document.getElementById('print-results').addEventListener('click', () => window.print());
     document.getElementById('export-csv').addEventListener('click', () =>
       Results.exportCsv(`blazers-scan-${(data.scan.finished_at || '').slice(0, 10)}.csv`));
-    document.addEventListener('DOMContentLoaded', () => Results.render(data.results));
+    document.addEventListener('DOMContentLoaded', () => {
+      PlayerStats.render(data.player);
+      Results.render(data.results);
+    });
   </script>
 </body>
 </html>

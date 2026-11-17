@@ -27,6 +27,10 @@ LOOKBACK_DAYS = _env_int("LOOKBACK_DAYS", 3)
 MAX_ARTICLES = _env_int("MAX_ARTICLES", 80)
 FETCH_WORKERS = _env_int("FETCH_WORKERS", 4)
 
+# Player whose game stats are shown above the results (ESPN athlete id; Deni Avdija = 4683021).
+PLAYER_ESPN_ID = _env_int("PLAYER_ESPN_ID", 4683021)
+PLAYER_STATS_RECENT_GAMES = _env_int("PLAYER_STATS_RECENT_GAMES", 5)
+
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
