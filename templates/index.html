@@ -6,6 +6,7 @@
   <title>Blazer's Edge – Deni/Avdija Scanner</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <script src="{{ url_for('static', filename='results.js') }}"></script>
+  <script src="{{ url_for('static', filename='player.js') }}"></script>
 </head>
 <body>
   <header class="page-header">
@@ -25,6 +26,8 @@
       <div class="progress-fill" id="progress-fill"></div>
     </div>
   </div>
+
+{% include "_player.html" %}
 
   <div class="toolbar" id="toolbar" hidden>
     <label class="scan-picker">
@@ -316,6 +319,9 @@
     $('print-results').addEventListener('click', () => window.print());
     $('export-csv').addEventListener('click', () => Results.exportCsv(`blazers-scan-${state.selectedScanId}.csv`));
     setInterval(updateFreshness, 60000);
+
+    // Independent of scans: if ESPN is unreachable the panel simply stays hidden.
+    fetch('/api/player-stats').then(r => r.ok ? r.json() : null).then(PlayerStats.render).catch(() => {});
 
     loadConfig();
     loadScans().then(scans => {

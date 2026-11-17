@@ -11,12 +11,14 @@ import hmac
 import logging
 import os
 import threading
+import time
 from functools import wraps
 
 from flask import Flask, jsonify, render_template, request
 
 from scanner import config, storage
 from scanner.scan import run_scan
+from scanner.stats import fetch_player_stats
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -48,6 +50,26 @@ def api_config():
         "max_articles": config.MAX_ARTICLES,
         "password_required": bool(PASSWORD),
     })
+
+
+_stats_cache = {"at": 0.0, "data": None}
+_stats_lock = threading.Lock()
+STATS_TTL_SEC = 600
+
+
+@app.route("/api/player-stats")
+def api_player_stats():
+    """Deni's game log and averages from ESPN, cached for 10 minutes; a failed refresh keeps serving the last good copy."""
+    with _stats_lock:
+        if time.time() - _stats_cache["at"] > STATS_TTL_SEC:
+            fresh = fetch_player_stats()
+            if fresh or _stats_cache["data"] is None:
+                _stats_cache["data"] = fresh
+            _stats_cache["at"] = time.time() if fresh else time.time() - STATS_TTL_SEC + 60  # retry failures after 1 min
+        data = _stats_cache["data"]
+    if not data:
+        return jsonify({"error": "Player stats unavailable"}), 502
+    return jsonify(data)
 
 
 @app.route("/api/scan", methods=["POST"])

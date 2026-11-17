@@ -471,6 +471,101 @@ mark {
   white-space: nowrap;
 }
 
+/* ---- Player stats panel ---- */
+
+.player-panel {
+  margin-bottom: 1.25rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.player-panel > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.player-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.player-panel > summary::before {
+  content: "▸";
+  color: var(--muted);
+  transition: transform 0.15s;
+}
+
+.player-panel[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.player-title {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.player-sub {
+  font-size: 0.85rem;
+}
+
+.player-body {
+  padding: 0 1rem 1rem;
+}
+
+.player-averages {
+  grid-template-columns: repeat(5, 1fr);
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 800px) {
+  .player-averages {
+    grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  }
+}
+
+.player-averages .stat-detail {
+  white-space: normal;
+}
+
+.trend-up { color: var(--success); }
+.trend-down { color: var(--error); }
+
+.gamelog th.num,
+.gamelog td.num {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.gamelog td.pts {
+  font-weight: 600;
+}
+
+.result {
+  display: inline-block;
+  min-width: 1.2rem;
+  margin-right: 0.35rem;
+  font-weight: 600;
+}
+
+.result-W { color: var(--success); }
+.result-L { color: var(--error); }
+
+.player-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+  font-size: 0.8rem;
+}
+
 /* ---- Comments ---- */
 
 .comments-header {
@@ -707,7 +802,10 @@ dialog .filter-input {
 @media print {
   body { background: #fff; color: #111; max-width: none; }
   .page-header .btn, .toolbar, .banner, .progress-card, .filter-bar, #toggle-groups, .toasts { display: none !important; }
-  .results-panel, .stat, .article-group, .comment-list.flat { background: #fff; border-color: #ddd; }
+  .results-panel, .stat, .article-group, .comment-list.flat, .player-panel { background: #fff; border-color: #ddd; }
+  .player-panel > summary::before, #gamelog-toggle { display: none; }
+  .result-W { color: #1a7f37; }
+  .result-L { color: #cf222e; }
   .comment-meta .author, .comment-text, .stat-value { color: #111; }
   .article-group > summary::before { display: none; }
   .article-group, .comment { break-inside: avoid; }
